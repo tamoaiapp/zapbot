@@ -1,0 +1,63 @@
+appId: com.tiago.zapbot
+productName: ZapBot
+copyright: Copyright © 2026 Tiago
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist/**
+  - dist-electron/**
+  - "!**/*.map"
+  - "!**/*.ts"
+  - "!**/tsconfig*.json"
+
+extraResources:
+  - from: resources/ollama/${os}
+    to: ollama
+    filter:
+      - "**/*"
+  - from: resources/default-prompt.md
+    to: default-prompt.md
+  - from: electron/migrations
+    to: migrations
+    filter:
+      - "*.sql"
+
+asarUnpack:
+  - "**/better-sqlite3/**"
+
+mac:
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+  category: public.app-category.business
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: ZapBot-Setup-${version}.exe
+
+linux:
+  target:
+    - AppImage
+  category: Office
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: ZapBot
+
+publish: null
