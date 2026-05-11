@@ -9,6 +9,7 @@ import { registerInboxIpc } from './ipc/inbox';
 import { registerConfigIpc } from './ipc/config';
 import { registerSchedulerIpc } from './ipc/scheduler';
 import { registerSystemIpc, buildSystemStatus } from './ipc/system';
+import { initAutoUpdater } from './services/updater';
 import { IpcChannels } from '../shared/types';
 
 const isDev = process.env.NODE_ENV === 'development';
@@ -119,6 +120,9 @@ async function bootstrap() {
 
   // Start scheduler tick
   startScheduler();
+
+  // Auto-update against tamoaiapp/zapbot GitHub Releases (packaged builds only)
+  initAutoUpdater();
 }
 
 app.whenReady().then(bootstrap).catch((e) => {

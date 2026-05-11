@@ -161,9 +161,18 @@ export function ChatWindow() {
           </button>
         </div>
         {!conv.bot_enabled && (
-          <p className="text-xs text-amber-600 mt-2 max-w-3xl mx-auto">
-            ⚠️ Bot pausado nesta conversa. Use "Reativar" para voltar a responder automaticamente.
-          </p>
+          <div className="mt-2 max-w-3xl mx-auto flex items-center justify-between gap-3">
+            <p className="text-xs text-amber-600">
+              ⚠️ Bot pausado nesta conversa. Você assumiu o atendimento.
+            </p>
+            <button
+              onClick={toggleBot}
+              className="btn flex-shrink-0 bg-wa-green text-white hover:bg-wa-green-dark text-xs px-3 py-1.5"
+            >
+              <Bot className="w-3.5 h-3.5" />
+              Reativar bot
+            </button>
+          </div>
         )}
       </div>
     </div>

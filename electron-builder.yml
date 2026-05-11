@@ -45,7 +45,7 @@ win:
     - target: nsis
       arch:
         - x64
-  artifactName: ZapBot-Setup-${version}.exe
+  artifactName: ZapBot-Setup-${version}.${ext}
 
 linux:
   target:
@@ -60,4 +60,8 @@ nsis:
   createStartMenuShortcut: true
   shortcutName: ZapBot
 
-publish: null
+publish:
+  - provider: github
+    owner: tamoaiapp
+    repo: zapbot
+    releaseType: release

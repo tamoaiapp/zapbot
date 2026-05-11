@@ -23,25 +23,52 @@ class OllamaManager {
   }
 
   /**
-   * Locate the bundled ollama binary.
-   * - Dev: resources/ollama/<os>/ollama[.exe]
-   * - Prod: process.resourcesPath/ollama/ollama[.exe]
+   * Locate an ollama binary to spawn. Order of preference:
+   *   1. Bundled binary that ships inside the app
+   *   2. System-wide Ollama install on common paths (Windows/macOS/Linux)
+   *
+   * Returns null only if neither is found.
    */
   private resolveBinaryPath(): string | null {
     const ext = process.platform === 'win32' ? '.exe' : '';
     const platformDir = process.platform === 'win32' ? 'win' : process.platform === 'darwin' ? 'mac' : 'linux';
 
-    // Compiled location: dist-electron/electron/services/ollama-manager.js
-    const candidates = app.isPackaged
+    // 1) Bundled inside the app (production) or repo (dev)
+    const bundled = app.isPackaged
       ? [path.join(process.resourcesPath, 'ollama', `ollama${ext}`)]
       : [
-          // <root>/resources/ollama/<platform>/ollama
+          // dist-electron/electron/services/ollama-manager.js  →  <root>
           path.join(__dirname, '..', '..', '..', 'resources', 'ollama', platformDir, `ollama${ext}`),
           path.join(process.cwd(), 'resources', 'ollama', platformDir, `ollama${ext}`),
         ];
 
-    for (const c of candidates) {
-      if (fs.existsSync(c)) return c;
+    // 2) System install fallbacks
+    const home = process.env.USERPROFILE || process.env.HOME || '';
+    const systemPaths: string[] = [];
+
+    if (process.platform === 'win32') {
+      systemPaths.push(
+        path.join(home, 'AppData', 'Local', 'Programs', 'Ollama', 'ollama.exe'),
+        'C:\\Program Files\\Ollama\\ollama.exe',
+        'C:\\ProgramData\\Ollama\\ollama.exe',
+      );
+    } else if (process.platform === 'darwin') {
+      systemPaths.push(
+        '/usr/local/bin/ollama',
+        '/opt/homebrew/bin/ollama',
+        '/Applications/Ollama.app/Contents/Resources/ollama',
+      );
+    } else {
+      systemPaths.push('/usr/local/bin/ollama', '/usr/bin/ollama', path.join(home, '.local/bin/ollama'));
+    }
+
+    // System install is preferred — typically includes all GGML backends + GPU libs.
+    // Bundled is a fallback for users who don't have Ollama installed.
+    for (const c of [...systemPaths, ...bundled]) {
+      if (fs.existsSync(c)) {
+        logger.info('Using ollama binary', { path: c });
+        return c;
+      }
     }
     return null;
   }

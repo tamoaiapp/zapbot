@@ -16,16 +16,20 @@ import { findMatch, invalidateKeywordCache } from './keyword-matcher';
 import { generateReply, ensureModelAvailable } from './llm';
 import type { ConnectionStatus, Message } from '../../shared/types';
 
-// Baileys uses dynamic imports to avoid loading native deps until needed
-// and to dodge its ESM/CJS interop quirks.
+// Baileys is published as an ESM-only package. Our electron main runs CommonJS
+// (tsconfig: module=CommonJS), and TypeScript would otherwise rewrite
+// `await import(...)` into `require(...)`, which fails with ERR_REQUIRE_ESM.
+// We use `new Function` to hide the import from the TS transpiler so it survives
+// as a true dynamic import at runtime.
 type WASocket = any;
+
+const dynamicImport = new Function('m', 'return import(m)') as <T = any>(m: string) => Promise<T>;
 
 let baileysModule: any = null;
 
 async function loadBaileys() {
   if (baileysModule) return baileysModule;
-  // @ts-ignore — Baileys has odd ESM/CJS shape
-  baileysModule = await import('@whiskeysockets/baileys');
+  baileysModule = await dynamicImport('@whiskeysockets/baileys');
   return baileysModule;
 }
 
@@ -43,6 +47,22 @@ export class WhatsAppService extends EventEmitter {
   private currentQr: string | null = null;
   private isShuttingDown = false;
   private reconnectAttempts = 0;
+  /**
+   * Dedupe set of incoming message IDs processed by the reply pipeline.
+   * Baileys can fire `messages.upsert` more than once for the same message
+   * (e.g. notify followed by an append/sync chunk), which previously caused
+   * the bot to answer twice. Bounded to 1000 entries — older keys drop.
+   */
+  private processedMessageIds = new Set<string>();
+
+  /**
+   * Per-conversation reply lock. If a reply is already being generated for a
+   * jid, any further inbound message on that jid is ignored until the current
+   * generation finishes. Prevents 2x/4x replies when Baileys re-delivers the
+   * same message under different keys (`@lid` vs `@s.whatsapp.net`, retries,
+   * multi-device sync).
+   */
+  private replyingFor = new Set<string>();
 
   on<E extends keyof WhatsAppEvents>(event: E, listener: WhatsAppEvents[E]): this {
     return super.on(event, listener as any);
@@ -85,7 +105,10 @@ export class WhatsAppService extends EventEmitter {
       version,
       auth: state,
       printQRInTerminal: false,
-      syncFullHistory: false,
+      // Pull historical chats so the inbox isn't empty on first login.
+      // History arrives via `messaging-history.set` and does NOT trigger
+      // auto-replies (the reply pipeline only fires on `messages.upsert`).
+      syncFullHistory: true,
       browser: ['ZapBot', 'Desktop', '1.0.0'],
       markOnlineOnConnect: true,
       generateHighQualityLinkPreview: false,
@@ -139,8 +162,23 @@ export class WhatsAppService extends EventEmitter {
     });
 
     this.sock.ev.on('messages.upsert', async (upsert: any) => {
-      if (upsert.type !== 'notify' && upsert.type !== 'append') return;
+      // Only real-time incoming messages — 'append' is for outbound sync
+      // from another device (already filtered by `msg.key.fromMe`).
+      if (upsert.type !== 'notify') return;
       for (const msg of upsert.messages ?? []) {
+        const id: string | undefined = msg?.key?.id;
+        if (id && this.processedMessageIds.has(id)) {
+          logger.debug('Skipping duplicate message.upsert', { id });
+          continue;
+        }
+        if (id) {
+          this.processedMessageIds.add(id);
+          // Bound the set so it doesn't grow forever.
+          if (this.processedMessageIds.size > 1000) {
+            const it = this.processedMessageIds.values().next();
+            if (!it.done) this.processedMessageIds.delete(it.value);
+          }
+        }
         try {
           await this.handleIncoming(msg);
         } catch (e) {
@@ -159,6 +197,156 @@ export class WhatsAppService extends EventEmitter {
         }
       }
     });
+
+    // Bulk history sync. Fires once (or in chunks) after `syncFullHistory: true`.
+    // Imports chats and messages without triggering the auto-reply pipeline.
+    this.sock.ev.on('messaging-history.set', (data: any) => {
+      try {
+        this.ingestHistory(data);
+      } catch (e) {
+        logger.error('Failed to ingest history', e);
+      }
+    });
+  }
+
+  /**
+   * Insert historical chats and messages from `messaging-history.set` into the DB.
+   * Skips group chats and broadcasts, mirrors `handleIncoming` minus the reply step.
+   */
+  private ingestHistory(data: {
+    chats?: any[];
+    messages?: any[];
+    contacts?: any[];
+    syncType?: number;
+    isLatest?: boolean;
+  }) {
+    const chats = data.chats ?? [];
+    const messages = data.messages ?? [];
+    const contacts = data.contacts ?? [];
+
+    // Build a quick contact-name lookup
+    const nameByJid = new Map<string, string>();
+    for (const c of contacts) {
+      if (c.id && (c.name || c.notify || c.verifiedName)) {
+        nameByJid.set(c.id, c.name ?? c.notify ?? c.verifiedName);
+      }
+    }
+
+    let chatsImported = 0;
+    for (const chat of chats) {
+      const jid: string | undefined = chat.id;
+      if (!jid || jid.endsWith('@g.us') || jid.endsWith('@broadcast')) continue;
+      if (!jid.endsWith('@s.whatsapp.net')) continue;
+
+      const phone = jid.split('@')[0];
+      const ts = Number(chat.conversationTimestamp ?? 0) * 1000 || Date.now();
+      upsertConversation({
+        id: jid,
+        contact_name: nameByJid.get(jid) ?? chat.name ?? null,
+        contact_phone: phone,
+        timestamp: ts,
+      });
+      chatsImported++;
+    }
+
+    let messagesImported = 0;
+    for (const msg of messages) {
+      const jid: string | undefined = msg.key?.remoteJid;
+      if (!jid || jid.endsWith('@g.us') || jid.endsWith('@broadcast')) continue;
+      if (!jid.endsWith('@s.whatsapp.net')) continue;
+      if (!msg.message) continue; // ignore protocol-only entries
+
+      // Same filter as live messages — drop reactions, protocol, polls, etc.
+      const content = this.extractContent(msg.message);
+      if (!content) continue;
+      const { body, mediaType } = content;
+
+      const ts =
+        typeof msg.messageTimestamp === 'number'
+          ? msg.messageTimestamp * 1000
+          : Number(msg.messageTimestamp) * 1000;
+      const isOut = !!msg.key.fromMe;
+
+      // Make sure the conversation row exists (history may include chats not in `chats` list)
+      const phone = jid.split('@')[0];
+      upsertConversation({
+        id: jid,
+        contact_name: nameByJid.get(jid) ?? msg.pushName ?? null,
+        contact_phone: phone,
+        timestamp: ts,
+      });
+
+      insertMessage({
+        id: msg.key.id,
+        conversation_id: jid,
+        direction: isOut ? 'out' : 'in',
+        sender: isOut ? 'human' : 'contact',
+        body,
+        media_type: mediaType,
+        timestamp: ts,
+        status: 'sent',
+      });
+      messagesImported++;
+    }
+
+    logger.info('History sync chunk', {
+      chats: chatsImported,
+      messages: messagesImported,
+      isLatest: data.isLatest,
+    });
+
+    // Tell the renderer to refresh the conversation list
+    if (chatsImported > 0 || messagesImported > 0) {
+      this.emit('conversation-updated', '*');
+    }
+  }
+
+  /**
+   * Try to extract real, user-visible content from a Baileys message envelope.
+   * Returns null for events we should ignore entirely:
+   *  - reactions (emoji on another msg)
+   *  - protocol messages (edits, deletes, key rotations)
+   *  - poll updates (someone voted on a poll)
+   *  - sender-key distribution (E2E key exchange)
+   *  - empty / metadata-only envelopes
+   *
+   * Returns the actual content for text, image, audio, video, document.
+   */
+  private extractContent(
+    rawMessage: any
+  ): { body: string; mediaType: Message['media_type'] } | null {
+    if (!rawMessage) return null;
+
+    // Unwrap ephemeral / view-once / device-sent wrappers so we can read the inner content
+    let m = rawMessage;
+    if (m.ephemeralMessage?.message) m = m.ephemeralMessage.message;
+    if (m.viewOnceMessage?.message) m = m.viewOnceMessage.message;
+    if (m.viewOnceMessageV2?.message) m = m.viewOnceMessageV2.message;
+    if (m.viewOnceMessageV2Extension?.message) m = m.viewOnceMessageV2Extension.message;
+    if (m.deviceSentMessage?.message) m = m.deviceSentMessage.message;
+
+    // Things we deliberately ignore (no user-visible content)
+    if (m.reactionMessage) return null;
+    if (m.protocolMessage) return null;
+    if (m.senderKeyDistributionMessage && !m.conversation && !m.extendedTextMessage) return null;
+    if (m.pollUpdateMessage) return null;
+    if (m.messageContextInfo && Object.keys(m).length === 1) return null;
+    if (m.stickerMessage) return null; // v1: ignore stickers — no auto-reply makes sense
+
+    if (m.conversation) return { body: m.conversation, mediaType: null };
+    if (m.extendedTextMessage?.text)
+      return { body: m.extendedTextMessage.text, mediaType: null };
+    if (m.imageMessage)
+      return { body: m.imageMessage.caption ?? '[Imagem]', mediaType: 'image' };
+    if (m.audioMessage) return { body: '[Áudio]', mediaType: 'audio' };
+    if (m.videoMessage)
+      return { body: m.videoMessage.caption ?? '[Vídeo]', mediaType: 'video' };
+    if (m.documentMessage)
+      return { body: m.documentMessage.fileName ?? '[Documento]', mediaType: 'document' };
+
+    // Unknown — log so we can extend later, but don't surface as a phantom message.
+    logger.debug('Ignored unknown message type', { keys: Object.keys(m).slice(0, 5) });
+    return null;
   }
 
   private async handleIncoming(msg: any) {
@@ -170,6 +358,10 @@ export class WhatsAppService extends EventEmitter {
       return;
     }
 
+    // Filter out reactions, edits, key exchanges, poll votes, etc.
+    const content = this.extractContent(msg.message);
+    if (!content) return;
+
     const jid: string = msg.key.remoteJid;
     const phone = jid.split('@')[0];
     const contactName = msg.pushName ?? null;
@@ -177,32 +369,6 @@ export class WhatsAppService extends EventEmitter {
       typeof msg.messageTimestamp === 'number'
         ? msg.messageTimestamp * 1000
         : Number(msg.messageTimestamp) * 1000;
-
-    // Extract text body
-    const m = msg.message ?? {};
-    let body = '';
-    let mediaType: Message['media_type'] = null;
-    let mediaPath: string | null = null;
-
-    if (m.conversation) {
-      body = m.conversation;
-    } else if (m.extendedTextMessage?.text) {
-      body = m.extendedTextMessage.text;
-    } else if (m.imageMessage) {
-      mediaType = 'image';
-      body = m.imageMessage.caption ?? '[Imagem]';
-    } else if (m.audioMessage) {
-      mediaType = 'audio';
-      body = '[Áudio recebido]';
-    } else if (m.videoMessage) {
-      mediaType = 'video';
-      body = m.videoMessage.caption ?? '[Vídeo]';
-    } else if (m.documentMessage) {
-      mediaType = 'document';
-      body = m.documentMessage.fileName ?? '[Documento]';
-    } else {
-      body = '[Mensagem não suportada]';
-    }
 
     upsertConversation({
       id: jid,
@@ -216,9 +382,9 @@ export class WhatsAppService extends EventEmitter {
       conversation_id: jid,
       direction: 'in',
       sender: 'contact',
-      body,
-      media_type: mediaType,
-      media_path: mediaPath,
+      body: content.body,
+      media_type: content.mediaType,
+      media_path: null,
       timestamp,
       status: 'sent',
     });
@@ -228,7 +394,7 @@ export class WhatsAppService extends EventEmitter {
     this.emit('conversation-updated', jid);
 
     // Pipeline
-    await this.maybeReply(jid, body, mediaType);
+    await this.maybeReply(jid, content.body, content.mediaType);
   }
 
   private async maybeReply(jid: string, incomingBody: string, mediaType: Message['media_type']) {
@@ -257,42 +423,55 @@ export class WhatsAppService extends EventEmitter {
       return;
     }
 
-    // Make sure model is available before attempting
-    const hasModel = await ensureModelAvailable().catch(() => false);
-    if (!hasModel) {
-      logger.warn('Model not available, skipping auto-reply', { jid });
+    // Per-conversation lock — if we're already generating a reply for this
+    // jid, drop the new trigger. Catches duplicate upserts that survive the
+    // ID dedup (e.g. same message redelivered under @lid and @s.whatsapp.net).
+    if (this.replyingFor.has(jid)) {
+      logger.debug('Reply already in flight, skipping duplicate trigger', { jid });
       return;
     }
+    this.replyingFor.add(jid);
 
-    // Humanized delay with jitter
-    const base = cfg.response_delay_ms;
-    const jitter = Math.floor(base * (Math.random() * 0.6 - 0.3));
-    const delay = Math.max(500, base + jitter);
-    await new Promise((r) => setTimeout(r, delay));
-
-    // Show "typing..."
     try {
-      await this.sock?.sendPresenceUpdate('composing', jid);
-    } catch (e) {
-      logger.warn('Failed to send presence', e);
-    }
+      // Make sure model is available before attempting
+      const hasModel = await ensureModelAvailable().catch(() => false);
+      if (!hasModel) {
+        logger.warn('Model not available, skipping auto-reply', { jid });
+        return;
+      }
 
-    let reply: string;
-    try {
-      reply = await generateReply(jid);
-    } catch (e) {
-      logger.error('LLM failed', e);
+      // Humanized delay with jitter
+      const base = cfg.response_delay_ms;
+      const jitter = Math.floor(base * (Math.random() * 0.6 - 0.3));
+      const delay = Math.max(500, base + jitter);
+      await new Promise((r) => setTimeout(r, delay));
+
+      // Show "typing..."
+      try {
+        await this.sock?.sendPresenceUpdate('composing', jid);
+      } catch (e) {
+        logger.warn('Failed to send presence', e);
+      }
+
+      let reply: string;
+      try {
+        reply = await generateReply(jid);
+      } catch (e) {
+        logger.error('LLM failed', e);
+        try {
+          await this.sock?.sendPresenceUpdate('paused', jid);
+        } catch {}
+        return;
+      }
+
       try {
         await this.sock?.sendPresenceUpdate('paused', jid);
       } catch {}
-      return;
+
+      await this.send(jid, reply, 'bot');
+    } finally {
+      this.replyingFor.delete(jid);
     }
-
-    try {
-      await this.sock?.sendPresenceUpdate('paused', jid);
-    } catch {}
-
-    await this.send(jid, reply, 'bot');
   }
 
   /**

@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/ipc';
 import { useAppStore } from '../store/app-store';
-import { Smartphone, Download, CheckCircle, AlertCircle } from 'lucide-react';
+import { CheckCircle } from 'lucide-react';
 import type { OllamaPullProgress } from '../../shared/types';
 import { formatBytes } from '../lib/format';
 
@@ -12,18 +12,14 @@ export function Onboarding() {
   const [pulling, setPulling] = useState(false);
   const [pullProgress, setPullProgress] = useState<OllamaPullProgress | null>(null);
   const [pullError, setPullError] = useState<string | null>(null);
+  const startedRef = useRef(false);
 
   useEffect(() => {
     const off = api.onPullProgress(setPullProgress);
     return off;
   }, []);
 
-  // When everything is ready, go to inbox
-  useEffect(() => {
-    if (status?.whatsapp === 'open' && status.model_installed) {
-      navigate('/inbox', { replace: true });
-    }
-  }, [status, navigate]);
+  // Auto-redirect disabled — user clicks "Continuar" so they can pace the demo.
 
   const startPull = async () => {
     if (!status) return;
@@ -41,6 +37,19 @@ export function Onboarding() {
       setPulling(false);
     }
   };
+
+  // Auto-start the model download as soon as the environment is ready.
+  // No button: this is part of "preparing the app" from the user's perspective.
+  useEffect(() => {
+    if (startedRef.current) return;
+    if (status?.ollama !== 'ready') return;
+    if (status.model_installed) return;
+    if (pulling) return;
+    startedRef.current = true;
+    void startPull();
+    // We intentionally only watch the readiness gate; startPull is stable enough.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status?.ollama, status?.model_installed]);
 
   const waStep = {
     done: status?.whatsapp === 'open',
@@ -66,56 +75,76 @@ export function Onboarding() {
         {/* Step 1 — Ollama */}
         <Step
           number={1}
-          title="Iniciando o motor de IA local"
+          title="Preparando o ambiente"
           done={ollamaStep.done}
           description={
             ollamaStep.done
-              ? 'Ollama está rodando.'
+              ? 'Tudo pronto.'
               : status?.ollama === 'error'
-                ? 'Falha ao iniciar Ollama. Verifique os logs.'
-                : 'Aguarde alguns segundos…'
+                ? 'Não consegui iniciar. Verifique se o Ollama está instalado ou reabra o app.'
+                : 'Só um instante…'
           }
-          icon={ollamaStep.done ? CheckCircle : AlertCircle}
-        />
+        >
+          {status?.ollama === 'error' && (
+            <a
+              href="https://ollama.com/download"
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-2 mt-3 text-sm text-blue-600 hover:text-blue-700 underline"
+            >
+              Baixar Ollama (atalho oficial)
+            </a>
+          )}
+        </Step>
 
-        {/* Step 2 — Model download */}
+        {/* Step 2 — Model download (starts automatically once env is ready) */}
         <Step
           number={2}
-          title={`Baixar modelo: ${status?.current_model ?? '...'}`}
+          title="Baixar a inteligência artificial"
           done={modelStep.done}
           description={
             modelStep.done
-              ? 'Modelo pronto.'
-              : pulling
+              ? 'Pronto para responder.'
+              : pulling || pullProgress
                 ? renderPullStatus(pullProgress)
-                : 'O download pode levar 5–15 minutos na primeira vez (~2GB).'
+                : !ollamaStep.done
+                  ? 'Vai começar assim que o ambiente terminar de preparar.'
+                  : 'Primeira vez leva 5 a 15 minutos. Depois fica salvo.'
           }
-          icon={Download}
         >
-          {!modelStep.done && !pulling && ollamaStep.done && (
-            <button onClick={startPull} className="btn-primary mt-3">
-              <Download className="w-4 h-4" />
-              Baixar agora
-            </button>
-          )}
-          {pulling && pullProgress?.percent !== undefined && (
+          {pulling && (
             <div className="mt-3">
               <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
                 <div
                   className="h-full bg-wa-green transition-all"
-                  style={{ width: `${pullProgress.percent}%` }}
+                  style={{
+                    width: pullProgress?.percent ? `${pullProgress.percent}%` : '5%',
+                  }}
                 />
               </div>
-              <p className="text-xs text-slate-500 mt-1">
-                {pullProgress.percent}%
-                {pullProgress.total && pullProgress.completed
-                  ? ` (${formatBytes(pullProgress.completed)} / ${formatBytes(pullProgress.total)})`
-                  : ''}
-              </p>
+              {pullProgress?.total && pullProgress.completed && (
+                <p className="text-xs text-slate-500 mt-1">
+                  {formatBytes(pullProgress.completed)} de{' '}
+                  {formatBytes(pullProgress.total)}
+                </p>
+              )}
             </div>
           )}
           {pullError && (
-            <p className="mt-2 text-sm text-red-600">Erro: {pullError}</p>
+            <div className="mt-3">
+              <p className="text-sm text-red-600">
+                Não foi possível baixar: {pullError}
+              </p>
+              <button
+                onClick={() => {
+                  startedRef.current = false;
+                  startPull();
+                }}
+                className="btn-secondary mt-2 text-sm"
+              >
+                Tentar de novo
+              </button>
+            </div>
           )}
         </Step>
 
@@ -128,12 +157,11 @@ export function Onboarding() {
             waStep.done
               ? 'Conectado!'
               : status?.whatsapp === 'qr'
-                ? 'Abra o WhatsApp no seu celular → Configurações → Aparelhos conectados → Conectar aparelho.'
+                ? 'Abra o WhatsApp no celular → Aparelhos conectados → Conectar aparelho.'
                 : status?.whatsapp === 'connecting'
                   ? 'Conectando…'
-                  : 'Aguardando QR Code…'
+                  : 'Preparando…'
           }
-          icon={Smartphone}
         >
           {status?.qr && status.whatsapp !== 'open' && (
             <div className="mt-4 flex justify-center">
@@ -146,18 +174,34 @@ export function Onboarding() {
           )}
         </Step>
 
-        <p className="text-xs text-slate-500 text-center mt-6">
-          Tudo roda na sua máquina. Suas conversas e configurações não saem daqui.
-        </p>
+        {/* Continue button — enabled when everything's ready */}
+        <div className="mt-6 flex flex-col items-center gap-2">
+          <button
+            onClick={() => navigate('/inbox', { replace: true })}
+            disabled={!waStep.done || !modelStep.done}
+            className="btn-primary px-8 py-3 text-base disabled:bg-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed"
+          >
+            Continuar para o ZapBot →
+          </button>
+          <p className="text-xs text-slate-500 text-center mt-2">
+            Tudo roda na sua máquina. Suas conversas e configurações não saem daqui.
+          </p>
+        </div>
       </div>
     </div>
   );
 }
 
 function renderPullStatus(p: OllamaPullProgress | null): string {
-  if (!p) return 'Conectando ao Ollama…';
-  if (p.percent !== undefined) return `${p.status} (${p.percent}%)`;
-  return p.status;
+  if (!p) return 'Iniciando download…';
+  if (p.percent !== undefined) return `Baixando — ${p.percent}%`;
+  // Translate Ollama statuses to friendly Portuguese
+  const status = p.status.toLowerCase();
+  if (status.includes('pulling')) return 'Baixando…';
+  if (status.includes('verifying')) return 'Verificando arquivos…';
+  if (status.includes('writing')) return 'Salvando no disco…';
+  if (status.includes('success')) return 'Concluído!';
+  return 'Preparando…';
 }
 
 function Step({
@@ -165,14 +209,12 @@ function Step({
   title,
   description,
   done,
-  icon: Icon,
   children,
 }: {
   number: number;
   title: string;
   description: string;
   done: boolean;
-  icon: React.ComponentType<{ className?: string }>;
   children?: React.ReactNode;
 }) {
   return (
@@ -185,11 +227,10 @@ function Step({
         {done ? <CheckCircle className="w-5 h-5" /> : <span className="text-sm font-bold">{number}</span>}
       </div>
       <div className="flex-1">
-        <div className="flex items-center gap-2">
-          <h3 className="font-semibold text-slate-900">{title}</h3>
-          <Icon className={`w-4 h-4 ${done ? 'text-wa-green' : 'text-slate-400'}`} />
-        </div>
-        <p className="text-sm text-slate-600 mt-1">{description}</p>
+        <h3 className="font-semibold text-slate-900">{title}</h3>
+        <p className="text-sm text-slate-600 mt-1 flex items-center gap-2">
+          {description}
+        </p>
         {children}
       </div>
     </div>

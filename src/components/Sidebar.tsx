@@ -6,7 +6,7 @@ import { cn } from '../lib/format';
 const items = [
   { to: '/inbox', icon: MessageSquare, label: 'Conversas' },
   { to: '/scheduler', icon: Calendar, label: 'Agendamentos' },
-  { to: '/config', icon: Sliders, label: 'Configuração' },
+  { to: '/config', icon: Sliders, label: 'Ajustar IA' },
   { to: '/settings', icon: Settings, label: 'Configurações' },
 ];
 
@@ -22,10 +22,10 @@ export function Sidebar() {
 
   const ollamaState =
     status?.ollama === 'ready'
-      ? { color: 'bg-green-500', label: 'LLM pronto' }
+      ? { color: 'bg-green-500', label: 'IA pronta' }
       : status?.ollama === 'starting'
-        ? { color: 'bg-amber-500 animate-pulse', label: 'LLM iniciando' }
-        : { color: 'bg-red-500', label: 'LLM offline' };
+        ? { color: 'bg-amber-500 animate-pulse', label: 'IA carregando' }
+        : { color: 'bg-red-500', label: 'IA offline' };
 
   return (
     <aside className="w-60 bg-wa-teal text-white flex flex-col">
@@ -64,11 +64,7 @@ export function Sidebar() {
           <span className={cn('w-2 h-2 rounded-full', ollamaState.color)} />
           <span className="text-white/80">{ollamaState.label}</span>
         </div>
-        {status?.current_model && (
-          <p className="text-white/40 truncate" title={status.current_model}>
-            {status.current_model}
-          </p>
-        )}
+        {/* Technical model name hidden — visible only in Settings for power users */}
       </div>
     </aside>
   );

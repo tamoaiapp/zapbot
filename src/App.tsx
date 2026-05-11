@@ -87,7 +87,7 @@ export default function App() {
           </Layout>
         }
       />
-      <Route path="*" element={<Navigate to="/inbox" replace />} />
+      <Route path="*" element={<Navigate to="/onboarding" replace />} />
     </Routes>
   );
 }

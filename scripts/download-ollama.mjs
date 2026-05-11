@@ -182,7 +182,8 @@ async function processPlatform(key) {
   }
 
   console.log(`[${cfg.label}] downloading from ${cfg.url}`);
-  const archive = path.join(platformDir, '__archive__');
+  const archiveExt = cfg.archive === 'zip' ? '.zip' : '.tgz';
+  const archive = path.join(platformDir, `__archive__${archiveExt}`);
 
   try {
     await download(cfg.url, archive);

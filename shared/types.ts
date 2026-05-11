@@ -64,7 +64,7 @@ export interface Keyword {
   enabled: 0 | 1;
 }
 
-export type Recurrence = null | 'daily' | 'weekly' | `cron:${string}`;
+export type Recurrence = null | 'daily' | 'weekly' | string; // 'cron:<expr>' for cron strings
 export type ScheduledStatus = 'pending' | 'sent' | 'failed' | 'cancelled';
 
 export interface ScheduledMessage {
