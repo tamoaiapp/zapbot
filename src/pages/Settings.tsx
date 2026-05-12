@@ -93,7 +93,7 @@ export function Settings() {
         </section>
 
         <p className="text-xs text-slate-500 text-center">
-          ZapBot v0.1.0 · Dados em <code className="bg-slate-100 px-1 rounded">userData/</code> · Tudo local.
+          ZapBot v0.1.2 · atualiza sozinho · dados em <code className="bg-slate-100 px-1 rounded">userData/</code> · tudo local.
         </p>
       </div>
     </div>

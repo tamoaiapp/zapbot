@@ -1,6 +1,6 @@
 {
   "name": "zapbot",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "WhatsApp auto-responder desktop app with local LLM (Ollama + Qwen)",
   "private": true,
   "author": "Tiago",
