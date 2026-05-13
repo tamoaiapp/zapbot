@@ -109,7 +109,7 @@ export function Onboarding() {
                 ? renderPullStatus(pullProgress)
                 : !ollamaStep.done
                   ? 'Vai começar assim que o ambiente terminar de preparar.'
-                  : 'Primeira vez leva 5 a 15 minutos. Depois fica salvo.'
+                  : modelSizeHint(status?.current_model)
           }
         >
           {pulling && (
@@ -202,6 +202,14 @@ function renderPullStatus(p: OllamaPullProgress | null): string {
   if (status.includes('writing')) return 'Salvando no disco…';
   if (status.includes('success')) return 'Concluído!';
   return 'Preparando…';
+}
+
+function modelSizeHint(model?: string): string {
+  if (!model) return 'Aguardando…';
+  if (model.includes('1.5b')) return 'Download leve (~1.2 GB). Leva 3–8 min no Wi-Fi comum.';
+  if (model.includes('3b')) return 'Download médio (~2 GB). Leva 5–12 min no Wi-Fi comum.';
+  if (model.includes('7b')) return 'Download maior (~4.5 GB). Leva 10–20 min no Wi-Fi comum.';
+  return 'O download pode levar alguns minutos na primeira vez.';
 }
 
 function Step({

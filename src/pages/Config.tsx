@@ -1,8 +1,55 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/ipc';
 import type { BotConfig, Keyword, Rule } from '../../shared/types';
-import { Plus, Trash2, GripVertical, Save, Power } from 'lucide-react';
+import { Plus, Trash2, GripVertical, Save, Power, Check, Download, AlertTriangle, Zap } from 'lucide-react';
 import { cn } from '../lib/format';
+
+type ModelOption = {
+  id: string;
+  name: string;
+  size: string;
+  ram: string;
+  speed: string;
+  recommended: 'leves' | 'medios' | 'fortes';
+  badge: 'PADRÃO' | 'MÉDIO' | 'PESADO';
+  badgeColor: string;
+  warning?: string;
+};
+
+const MODEL_OPTIONS: ModelOption[] = [
+  {
+    id: 'qwen2.5:1.5b-instruct-q4_K_M',
+    name: 'Qwen 2.5 1.5B',
+    size: '~1.2 GB',
+    ram: '~3 GB de RAM',
+    speed: 'resposta em 1-3s',
+    recommended: 'leves',
+    badge: 'PADRÃO',
+    badgeColor: '#16c784',
+  },
+  {
+    id: 'qwen2.5:3b-instruct-q4_K_M',
+    name: 'Qwen 2.5 3B',
+    size: '~2 GB',
+    ram: '~5 GB de RAM',
+    speed: 'resposta em 2-4s',
+    recommended: 'medios',
+    badge: 'MÉDIO',
+    badgeColor: '#a855f7',
+    warning: 'Precisa baixar (~2 GB). PC com menos de 8 GB de RAM pode travar.',
+  },
+  {
+    id: 'qwen2.5:7b-instruct-q4_K_M',
+    name: 'Qwen 2.5 7B',
+    size: '~4.5 GB',
+    ram: '~8 GB de RAM',
+    speed: 'resposta em 3-6s',
+    recommended: 'fortes',
+    badge: 'PESADO',
+    badgeColor: '#ef4444',
+    warning: 'Precisa baixar (~4.5 GB). Recomendado só com 16 GB+ de RAM ou GPU dedicada.',
+  },
+];
 
 const TABS = [
   { key: 'identity', label: 'Identidade' },
@@ -334,14 +381,40 @@ function KeywordsTab() {
 function ModelTab() {
   const [cfg, setCfg] = useState<BotConfig | null>(null);
   const [saving, setSaving] = useState(false);
+  const [installedModels, setInstalledModels] = useState<Set<string>>(new Set());
+  const [pulling, setPulling] = useState<string | null>(null);
 
   useEffect(() => {
     api.getBotConfig().then(setCfg);
+    api.listModels().then((models) => {
+      setInstalledModels(new Set(models.map((m) => m.name)));
+    });
   }, []);
 
   if (!cfg) return <p className="text-slate-500">Carregando…</p>;
 
-  const save = async () => {
+  const selectedOption = MODEL_OPTIONS.find((m) => m.id === cfg.model_name);
+  const needsDownload = selectedOption && !modelInstalled(installedModels, selectedOption.id);
+
+  const handleSelect = async (modelId: string) => {
+    setCfg({ ...cfg, model_name: modelId });
+  };
+
+  const downloadAndSave = async () => {
+    if (!selectedOption) return;
+    if (needsDownload) {
+      setPulling(selectedOption.id);
+      try {
+        await api.pullModel(selectedOption.id);
+        const fresh = await api.listModels();
+        setInstalledModels(new Set(fresh.map((m) => m.name)));
+      } catch (e) {
+        alert(`Erro ao baixar modelo: ${e instanceof Error ? e.message : String(e)}`);
+        setPulling(null);
+        return;
+      }
+      setPulling(null);
+    }
     setSaving(true);
     try {
       const updated = await api.updateBotConfig({
@@ -356,19 +429,91 @@ function ModelTab() {
     }
   };
 
+  const save = downloadAndSave;
+
   return (
-    <div className="max-w-2xl space-y-6">
-      <Field label="Modelo" hint="Mude apenas se souber o que está fazendo.">
-        <select
-          className="input"
-          value={cfg.model_name}
-          onChange={(e) => setCfg({ ...cfg, model_name: e.target.value })}
-        >
-          <option value="qwen2.5:3b-instruct-q4_K_M">Qwen 2.5 3B (padrão, ~2GB)</option>
-          <option value="qwen2.5:7b-instruct-q4_K_M">Qwen 2.5 7B (melhor, ~4.5GB)</option>
-          <option value="qwen2.5:1.5b-instruct-q4_K_M">Qwen 2.5 1.5B (rápido, máquinas fracas)</option>
-        </select>
-      </Field>
+    <div className="max-w-3xl space-y-6">
+      <div>
+        <h3 className="font-semibold text-slate-900 mb-1">Modelo de IA</h3>
+        <p className="text-sm text-slate-500 mb-4">
+          O 1.5B já é mais que suficiente pra atendimento padrão (preço, frete, FAQs).
+          Modelos maiores entendem melhor frases complexas, mas consomem mais RAM.
+        </p>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          {MODEL_OPTIONS.map((m) => {
+            const isSelected = cfg.model_name === m.id;
+            const isInstalled = modelInstalled(installedModels, m.id);
+            return (
+              <button
+                key={m.id}
+                type="button"
+                onClick={() => handleSelect(m.id)}
+                className={cn(
+                  'text-left p-4 rounded-xl border-2 transition relative',
+                  isSelected
+                    ? 'border-wa-green bg-wa-green/5 ring-2 ring-wa-green/30'
+                    : 'border-slate-200 hover:border-slate-300 bg-white',
+                )}
+              >
+                <div className="flex items-center justify-between mb-2">
+                  <span
+                    className="text-[10px] font-bold tracking-wide px-2 py-0.5 rounded-full text-white"
+                    style={{ background: m.badgeColor }}
+                  >
+                    {m.badge}
+                  </span>
+                  {isInstalled ? (
+                    <span className="text-xs text-green-600 font-semibold flex items-center gap-1">
+                      <Check className="w-3 h-3" /> instalado
+                    </span>
+                  ) : (
+                    <span className="text-xs text-slate-400 flex items-center gap-1">
+                      <Download className="w-3 h-3" /> baixar
+                    </span>
+                  )}
+                </div>
+                <div className="font-bold text-slate-900">{m.name}</div>
+                <ul className="mt-2 space-y-1 text-xs text-slate-600">
+                  <li className="flex items-center gap-1.5">
+                    <Download className="w-3 h-3 text-slate-400" />
+                    {m.size} no disco
+                  </li>
+                  <li className="flex items-center gap-1.5">
+                    <span className="w-3 h-3 inline-flex items-center justify-center text-slate-400 text-[10px] font-bold">M</span>
+                    {m.ram} em uso
+                  </li>
+                  <li className="flex items-center gap-1.5">
+                    <Zap className="w-3 h-3 text-slate-400" />
+                    {m.speed}
+                  </li>
+                </ul>
+                {isSelected && (
+                  <div className="absolute -top-2 -right-2 w-6 h-6 rounded-full bg-wa-green text-white flex items-center justify-center shadow-md">
+                    <Check className="w-3.5 h-3.5" />
+                  </div>
+                )}
+              </button>
+            );
+          })}
+        </div>
+
+        {selectedOption?.warning && needsDownload && (
+          <div className="mt-3 flex items-start gap-2 p-3 rounded-lg bg-amber-50 border border-amber-200">
+            <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
+            <p className="text-sm text-amber-900">{selectedOption.warning}</p>
+          </div>
+        )}
+
+        {pulling && (
+          <div className="mt-3 p-3 rounded-lg bg-blue-50 border border-blue-200">
+            <p className="text-sm text-blue-900 flex items-center gap-2">
+              <Download className="w-4 h-4 animate-pulse" />
+              Baixando {pulling}… acompanhe o progresso no painel de Status.
+            </p>
+          </div>
+        )}
+      </div>
 
       <Field label={`Criatividade (temperatura): ${cfg.temperature.toFixed(2)}`}>
         <input
@@ -411,13 +556,30 @@ function ModelTab() {
       </Field>
 
       <div className="flex justify-end">
-        <button onClick={save} disabled={saving} className="btn-primary">
-          <Save className="w-4 h-4" />
-          {saving ? 'Salvando…' : 'Salvar'}
+        <button onClick={save} disabled={saving || !!pulling} className="btn-primary">
+          {needsDownload ? <Download className="w-4 h-4" /> : <Save className="w-4 h-4" />}
+          {pulling
+            ? 'Baixando…'
+            : saving
+              ? 'Salvando…'
+              : needsDownload
+                ? `Baixar e salvar (${selectedOption?.size})`
+                : 'Salvar'}
         </button>
       </div>
     </div>
   );
+}
+
+function modelInstalled(installed: Set<string>, id: string): boolean {
+  // Ollama list_models retorna nomes como "qwen2.5:1.5b-instruct-q4_K_M" exato
+  // mas às vezes lista variantes (com/sem tag). Aceita match exato ou prefixo do base.
+  if (installed.has(id)) return true;
+  const base = id.split(':')[0];
+  for (const m of installed) {
+    if (m.startsWith(`${base}:`) && m === id) return true;
+  }
+  return false;
 }
 
 function Field({
