@@ -1,0 +1,74 @@
+name: Build & Release Windows
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publicar como release no GitHub?'
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install deps (skip postinstall to avoid native build issues)
+        run: npm install --ignore-scripts
+        shell: pwsh
+
+      - name: Download Ollama (postinstall manual)
+        run: node scripts/download-ollama.mjs
+        shell: pwsh
+
+      - name: Rebuild native modules for Electron
+        run: npx electron-builder install-app-deps
+        shell: pwsh
+
+      - name: Build renderer (Vite)
+        run: npm run build:renderer
+        shell: pwsh
+
+      - name: Build Electron main (TypeScript)
+        run: npm run build:electron
+        shell: pwsh
+
+      - name: Build Windows installer (electron-builder)
+        run: npx electron-builder --win --publish=${{ (github.event_name == 'push' && contains(github.ref, 'refs/tags/')) || inputs.publish && 'always' || 'never' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload installer as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZapBot-Setup-windows
+          path: |
+            release/ZapBot-Setup-*.exe
+            release/latest.yml
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Smoke test (verifica que o exe abre)
+        run: |
+          $exe = "release/win-unpacked/ZapBot.exe"
+          if (-not (Test-Path $exe)) { throw "ZapBot.exe nao foi gerado" }
+          Write-Host "Build OK: $((Get-Item $exe).Length / 1MB) MB"
+          # nao executa de verdade — VM headless nao tem display
+        shell: pwsh

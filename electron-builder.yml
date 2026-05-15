@@ -26,6 +26,7 @@ extraResources:
       - "*.sql"
 
 asarUnpack:
+  - "**/*.node"
   - "**/better-sqlite3/**"
 
 mac:

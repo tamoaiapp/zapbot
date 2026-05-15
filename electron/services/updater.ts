@@ -1,9 +1,6 @@
 import { app, BrowserWindow, dialog } from "electron";
-import pkg from "electron-updater";
+import { autoUpdater } from "electron-updater";
 import { logger } from "../logger";
-
-// electron-updater is CJS-style — the default export carries `autoUpdater` plus the helper classes.
-const { autoUpdater } = pkg;
 
 /**
  * Initialize auto-update against GitHub Releases (tamoaiapp/zapbot).
